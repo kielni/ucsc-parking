@@ -22,6 +22,7 @@ from adjustText import adjust_text
 from matplotlib.axes import Axes
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
+from matplotlib.legend import Legend
 from matplotlib.patches import Patch
 from matplotlib.patheffects import withStroke
 from matplotlib.text import Text
@@ -105,6 +106,8 @@ WRAP_LENGTH: int = 20
 
 # Lot fill by PERMIT_SPACES: (minimum spaces, fill color, legend label),
 # largest first.
+# Legend line explaining the number in parentheses on lot labels.
+LEGEND_KEY: str = "Lot ___ (spaces)"
 SIZE_TIERS: list[tuple[int, str, str]] = [
     (100, "#a887dd", "100+ spaces"),
     (25, "#cbb6ee", "25-99 spaces"),
@@ -655,18 +658,22 @@ def draw_header(figure: Figure, ax: Axes) -> None:
         color="#555555",
         va="top",
     )
-    handles: list[Patch] = [
+    # First entry is a key to the lot labels: no swatch, just sample text.
+    key: Patch = Patch(facecolor="none", edgecolor="none", label=LEGEND_KEY)
+    handles: list[Patch] = [key] + [
         Patch(facecolor=color, edgecolor=LOT_EDGE, linewidth=0.5, label=label)
         for _, color, label in SIZE_TIERS
     ]
-    ax.legend(
+    legend: Legend = ax.legend(
         handles=handles,
         loc="upper right",
         fontsize=6,
-        title="A permit spaces",
+        # Mathtext bold for just the "A"; mathtext uses the same DejaVu Sans.
+        title=r"$\mathbf{A}$ permit spaces",
         title_fontsize=6,
         framealpha=0.9,
     )
+    legend.get_texts()[0].set_color(LOT_TEXT)
 
 
 def render(
