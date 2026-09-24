@@ -23,7 +23,7 @@ from matplotlib.axes import Axes
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from matplotlib.legend import Legend
-from matplotlib.patches import Patch
+from matplotlib.patches import Patch, Rectangle
 from matplotlib.patheffects import withStroke
 from matplotlib.text import Text
 from matplotlib.transforms import Bbox
@@ -106,6 +106,23 @@ WRAP_LENGTH: int = 20
 
 # Lot fill by PERMIT_SPACES: (minimum spaces, fill color, legend label),
 # largest first.
+# Scale bar length, and walking speed (m/s) for its "min walk" note.
+SCALE_FEET: int = 1000
+METERS_PER_FOOT: float = 0.3048
+WALK_SPEED: float = 1.4
+SCALE_COLOR: str = "#333333"
+# Alternating black/white segments; gap from the map edge in bar heights.
+SCALE_SEGMENTS: int = 4
+SCALE_GAP: float = 1.0
+SCALE_FONT_SIZE: float = 6.0
+
+# Data credits under the map, and their gap below it (inches).
+CREDITS: str = (
+    "Basemap: © OpenStreetMap contributors · Parking: UCSC TAPS ·"
+    " Buildings: The Center for Integrated Spatial Research, UC Santa Cruz"
+)
+CREDITS_GAP: float = 0.05
+
 # Legend line explaining the number in parentheses on lot labels.
 LEGEND_KEY: str = "Lot ___ (spaces)"
 SIZE_TIERS: list[tuple[int, str, str]] = [
@@ -230,8 +247,10 @@ def set_extent(
 ) -> Polygon:
     """Fit the map to the parking lots with a margin, keeping true shape.
 
-    south fixes the bottom edge; any extra height needed to fill the axes is
-    added to the north. Returns the visible extent.
+    south fixes the bottom edge. If the lots are wider than the axes'
+    shape, the axes get shorter (keeping their top edge) rather than showing
+    empty map to the north; if narrower, the map widens evenly. Returns the
+    visible extent.
     """
     minx, miny, maxx, maxy = lots.total_bounds
     left: float = minx - padding
@@ -245,13 +264,12 @@ def set_extent(
     figure_height: float
     figure_width, figure_height = ax.figure.get_size_inches()
     box_ratio: float = (box.height * figure_height) / (box.width * figure_width)
-    # Grow the shorter side so the map fills the axes at a 1:1 scale.
-    extra: float
+    # Keep a 1:1 scale: shrink the axes to a wide map, or widen a tall one.
     if height / width < box_ratio:
-        extra = width * box_ratio - height
-        top += extra
+        shorter: float = box.height * (height / width) / box_ratio
+        ax.set_position((box.x0, box.y1 - shorter, box.width, shorter))
     else:
-        extra = height / box_ratio - width
+        extra: float = height / box_ratio - width
         left -= extra / 2
         right += extra / 2
     ax.set_xlim(left, right)
@@ -666,7 +684,7 @@ def draw_header(figure: Figure, ax: Axes) -> None:
     ]
     legend: Legend = ax.legend(
         handles=handles,
-        loc="upper right",
+        loc="lower center",
         fontsize=6,
         # Mathtext bold for just the "A"; mathtext uses the same DejaVu Sans.
         title=r"$\mathbf{A}$ permit spaces",
@@ -674,6 +692,117 @@ def draw_header(figure: Figure, ax: Axes) -> None:
         framealpha=0.9,
     )
     legend.get_texts()[0].set_color(LOT_TEXT)
+
+
+def text_size(ax: Axes, text: str) -> tuple[float, float]:
+    """Return the width and height, in data units, of scale bar text."""
+    probe: Text = ax.text(0, 0, text, fontsize=SCALE_FONT_SIZE)
+    box: Bbox = text_boxes(ax, [probe])[0].transformed(ax.transData.inverted())
+    probe.remove()
+    return box.width, box.height
+
+
+def draw_scale_bar(ax: Axes) -> None:
+    """Add a scale bar with walking time in the map's bottom-right corner.
+
+    Alternating black and white segments with end caps, distance ticks below,
+    and the walking time to the right. The map is in UTM, so data units are
+    meters. Call after the extent is set.
+    """
+    meters: float = SCALE_FEET * METERS_PER_FOOT
+    minutes: int = round(meters / WALK_SPEED / 60)
+    walk: str = f"about {minutes} min walk"
+    height: float = meters / 40
+    pad: float = height
+    walk_width: float = text_size(ax, walk)[0]
+    tick_height: float = text_size(ax, "0")[1]
+    _, x1 = ax.get_xlim()
+    y0, _ = ax.get_ylim()
+    margin: float = SCALE_GAP * height
+    left: float = x1 - margin - pad - walk_width - 2 * height - meters
+    bottom: float = y0 + margin + pad + tick_height + 1.5 * height
+    segment: float = meters / SCALE_SEGMENTS
+    style: dict[str, object] = {"zorder": 8, "clip_on": True}
+    index: int
+    for index in range(SCALE_SEGMENTS):
+        ax.add_patch(
+            Rectangle(
+                (left + index * segment, bottom),
+                segment,
+                height,
+                facecolor=SCALE_COLOR if index % 2 == 0 else "white",
+                edgecolor=SCALE_COLOR,
+                linewidth=0.5,
+                **style,
+            )
+        )
+    end: float
+    for end in (left, left + meters):
+        ax.plot(
+            [end, end],
+            [bottom - height, bottom + 2 * height],
+            color=SCALE_COLOR,
+            linewidth=0.8,
+            solid_capstyle="butt",
+            **style,
+        )
+    texts: list[Text] = []
+    feet: int
+    for feet in (0, SCALE_FEET // 2, SCALE_FEET):
+        texts.append(
+            ax.text(
+                left + feet * METERS_PER_FOOT,
+                bottom - 1.5 * height,
+                f"{feet:,} ft" if feet == SCALE_FEET else f"{feet:,}",
+                fontsize=SCALE_FONT_SIZE,
+                color=SCALE_COLOR,
+                ha="center",
+                va="top",
+                **style,
+            )
+        )
+    texts.append(
+        ax.text(
+            left + meters + 2 * height,
+            bottom + height / 2,
+            walk,
+            fontsize=SCALE_FONT_SIZE,
+            color=SCALE_COLOR,
+            ha="left",
+            va="center",
+            **style,
+        )
+    )
+    # Soft white backing, like the legend's, so paths don't cross the bar.
+    to_data: object = ax.transData.inverted()
+    box: Bbox = Bbox.union(text_boxes(ax, texts)).transformed(to_data)
+    backing_left: float = min(box.x0, left) - pad
+    backing_bottom: float = box.y0 - pad
+    ax.add_patch(
+        Rectangle(
+            (backing_left, backing_bottom),
+            max(box.x1, left + meters) + pad - backing_left,
+            bottom + 2 * height + pad - backing_bottom,
+            facecolor="white",
+            edgecolor="none",
+            alpha=0.9,
+            zorder=7,
+            clip_on=True,
+        )
+    )
+
+
+def draw_credits(figure: Figure, ax: Axes) -> None:
+    """Add data credits in small text just below the map."""
+    box: Bbox = ax.get_position()
+    figure.text(
+        box.x0,
+        box.y0 - CREDITS_GAP / PAGE_SIZE[1],
+        CREDITS,
+        fontsize=5,
+        color="#555555",
+        va="top",
+    )
 
 
 def render(
@@ -710,6 +839,8 @@ def render(
         south_border(campus),
     )
     draw_header(figure, ax)
+    draw_scale_bar(ax)
+    draw_credits(figure, ax)
 
     figure.savefig(output_path, metadata={"Title": TITLE})
     # Raster copy next to the PDF for a quick preview.
