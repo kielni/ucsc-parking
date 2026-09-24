@@ -6,6 +6,7 @@ RUN pip install --no-cache-dir --target "${LAMBDA_TASK_ROOT}" \
     geopandas \
     matplotlib \
     pdfplumber \
+    pypdf \
     shapely
 
 COPY main.py buildings.py lambda_handler.py "${LAMBDA_TASK_ROOT}/"

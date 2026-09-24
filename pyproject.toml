@@ -10,5 +10,6 @@ dependencies = [
     "geopandas>=1.1.4",
     "matplotlib>=3.11.2",
     "pdfplumber>=0.11.10",
+    "pypdf>=6.19.0",
     "shapely>=2.1.2",
 ]

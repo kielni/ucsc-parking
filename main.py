@@ -13,6 +13,7 @@ import argparse
 import datetime
 import re
 from pathlib import Path
+from typing import BinaryIO
 
 import geopandas as gpd
 import matplotlib
@@ -27,6 +28,9 @@ from matplotlib.patches import Patch, Rectangle
 from matplotlib.patheffects import withStroke
 from matplotlib.text import Text
 from matplotlib.transforms import Bbox
+from pypdf import PageObject, PdfReader, PdfWriter
+from pypdf.annotations import Link
+from pypdf.generic import ArrayObject, NameObject
 from shapely.geometry import Point, Polygon
 from shapely.geometry import box as shapely_box
 
@@ -38,6 +42,10 @@ HEADER: float = 0.6
 # Meters of map beyond the outermost lots; labels stay inside the axes anyway.
 EXTENT_PADDING: float = 40.0
 PREVIEW_DPI: int = 200
+# Lot shapes are PDF links; their tap area extends this far (points) past the
+# lot's bounding box. PDF pages measure 72 points per inch.
+LINK_MARGIN: float = 6.0
+POINTS_PER_INCH: float = 72.0
 
 TITLE: str = "UC Santa Cruz student parking"
 
@@ -804,6 +812,75 @@ def draw_credits(figure: Figure, ax: Axes) -> None:
     )
 
 
+def lot_link_areas(
+    ax: Axes, lots: gpd.GeoDataFrame
+) -> list[tuple[tuple[float, float, float, float], str]]:
+    """Return a tap area and Google Maps URL for each lot on the map.
+
+    Each area is the lot's bounding box plus LINK_MARGIN, in PDF points from
+    the page's lower-left corner, clipped to the map. Call after the extent
+    and axes position are final.
+    """
+    x0, x1 = ax.get_xlim()
+    y0, y1 = ax.get_ylim()
+    anchors: gpd.GeoSeries = lots.representative_point()
+    visible: gpd.GeoDataFrame = lots[anchors.within(shapely_box(x0, y0, x1, y1))]
+    links: gpd.GeoSeries = visible.representative_point().to_crs(LINK_CRS)
+    to_points: object = (
+        ax.transData + ax.figure.transFigure.inverted()
+    )  # data -> page fraction
+    page_width: float = PAGE_SIZE[0] * POINTS_PER_INCH
+    page_height: float = PAGE_SIZE[1] * POINTS_PER_INCH
+    frame: Bbox = ax.get_position()
+    areas: list[tuple[tuple[float, float, float, float], str]] = []
+    bounds: tuple[float, float, float, float]
+    link: Point
+    for bounds, link in zip(visible.geometry.bounds.itertuples(index=False), links):
+        corners: np.ndarray = to_points.transform(
+            [(bounds[0], bounds[1]), (bounds[2], bounds[3])]
+        )
+        left: float = max(corners[0][0], frame.x0) * page_width - LINK_MARGIN
+        bottom: float = max(corners[0][1], frame.y0) * page_height - LINK_MARGIN
+        right: float = min(corners[1][0], frame.x1) * page_width + LINK_MARGIN
+        top: float = min(corners[1][1], frame.y1) * page_height + LINK_MARGIN
+        areas.append(((left, bottom, right, top), maps_url(link)))
+    return areas
+
+
+def add_links(
+    path: Path, areas: list[tuple[tuple[float, float, float, float], str]]
+) -> None:
+    """Add a link over each area to the first page of a PDF, in place.
+
+    matplotlib can only attach links to text, so the lot shapes get theirs
+    here, after saving. The links have no border, so they're invisible.
+    """
+    writer: PdfWriter = PdfWriter(clone_from=PdfReader(path))
+    # Viewers send a tap to the last link listed where areas overlap, so add
+    # large lots first and small lots (often inside a big lot's box) last.
+    ordered: list[tuple[tuple[float, float, float, float], str]] = sorted(
+        areas,
+        key=lambda area: -(area[0][2] - area[0][0]) * (area[0][3] - area[0][1]),
+    )
+    rect: tuple[float, float, float, float]
+    url: str
+    for rect, url in ordered:
+        writer.add_annotation(
+            page_number=0, annotation=Link(rect=rect, url=url, border=[0, 0, 0])
+        )
+    # Move the lot areas ahead of the label links matplotlib wrote, so a tap
+    # on a label always opens that label's lot, even over a neighbor's area.
+    page: PageObject = writer.pages[0]
+    annotations: list[object] = list(page["/Annots"])
+    added: int = len(ordered)
+    page[NameObject("/Annots")] = ArrayObject(
+        annotations[-added:] + annotations[:-added]
+    )
+    handle: BinaryIO
+    with path.open("wb") as handle:
+        writer.write(handle)
+
+
 def render(
     parking_path: Path, basemap_path: Path, labels_path: Path, output_path: Path
 ) -> None:
@@ -815,6 +892,10 @@ def render(
     roads, paths, buildings = load_basemap(basemap_path)
     building_labels: gpd.GeoDataFrame = place_poster_labels(
         load_poster_labels(labels_path), buildings
+    )
+    print(
+        f"loaded: {len(lots)} lots, {len(roads)} roads, {len(paths)} paths,"
+        f" {len(buildings)} buildings, {len(building_labels)} building labels"
     )
 
     figure: Figure = Figure(figsize=PAGE_SIZE)
@@ -840,10 +921,18 @@ def render(
     draw_header(figure, ax)
     draw_scale_bar(ax)
     draw_credits(figure, ax)
+    print(f"drew map: {len(campus)} campus lots")
 
+    areas: list[tuple[tuple[float, float, float, float], str]] = lot_link_areas(
+        ax, campus
+    )
     figure.savefig(output_path, metadata={"Title": TITLE})
+    add_links(output_path, areas)
+    print(f"wrote {output_path} with {len(areas)} lot links")
     # Raster copy next to the PDF, same name with .png, for a quick preview.
-    figure.savefig(output_path.with_suffix(".png"), dpi=PREVIEW_DPI)
+    preview: Path = output_path.with_suffix(".png")
+    figure.savefig(preview, dpi=PREVIEW_DPI)
+    print(f"wrote {preview}")
 
 
 def main() -> None:

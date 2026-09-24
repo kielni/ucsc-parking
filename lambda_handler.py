@@ -9,6 +9,7 @@ environment, or from local.env via the Makefile for `make run-aws`.
 
 import json
 import os
+import time
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -67,7 +68,9 @@ def upload(path: Path, bucket: str, key: str, content_type: str) -> None:
 
 def lambda_handler(event: Any, context: Any) -> None:
     """Fetch parking, render the map, and upload the PDF and PNG to S3."""
+    start: float = time.monotonic()
     bucket: str = os.environ["S3_BUCKET"]
+    print(f"start: bucket {bucket}")
     parking: Path = WORK / "parking.geojson"
     count: int = fetch_parking(os.environ["PARKING_URL"], parking)
     print(f"parking: {count} lots")
@@ -78,6 +81,7 @@ def lambda_handler(event: Any, context: Any) -> None:
     # render() writes the PNG preview next to the PDF with the same name.
     png: Path = pdf.with_suffix(".png")
     upload(png, bucket, png.name, "image/png")
+    print(f"done in {time.monotonic() - start:.1f}s")
 
 
 if __name__ == "__main__":
