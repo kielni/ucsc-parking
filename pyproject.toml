@@ -8,5 +8,6 @@ dependencies = [
     "adjusttext>=1.4.0",
     "geopandas>=1.1.4",
     "matplotlib>=3.11.2",
+    "pdfplumber>=0.11.10",
     "shapely>=2.1.2",
 ]

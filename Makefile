@@ -20,9 +20,11 @@ FILTERED_PBF := data/campus-filtered.osm.pbf
 
 PARKING := data/parking.geojson
 BASEMAP := data/basemap.geojson
+POSTER := UCSC Campus Map Poster.pdf
+LABELS := data/poster_labels.csv
 PDF := campus-parking.pdf
 
-.PHONY: all fetch parking basemap refresh-basemap render lint clean distclean
+.PHONY: all fetch parking basemap refresh-basemap labels render lint clean distclean
 
 all: fetch render
 
@@ -62,14 +64,20 @@ refresh-basemap:
 	rm -f $(BASEMAP)
 	$(MAKE) basemap
 
+# Building names and poster positions; only changes if the poster does.
+labels: $(LABELS)
+
+$(LABELS): buildings.py | data
+	uv run buildings.py "$(POSTER)" $@
+
 render: $(PDF)
 
-$(PDF): main.py $(PARKING) $(BASEMAP)
+$(PDF): main.py buildings.py $(PARKING) $(BASEMAP) $(LABELS)
 	@# also writes map.png next to the PDF for previewing
-	uv run main.py $(PARKING) $(BASEMAP) $@
+	uv run main.py $(PARKING) $(BASEMAP) $(LABELS) $@
 
 lint:
-	black main.py
+	black main.py buildings.py
 
 data:
 	mkdir -p $@
