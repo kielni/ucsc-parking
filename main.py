@@ -37,7 +37,6 @@ MARGIN: float = 0.25
 HEADER: float = 0.6
 # Meters of map beyond the outermost lots; labels stay inside the axes anyway.
 EXTENT_PADDING: float = 40.0
-PREVIEW_NAME: str = "map.png"
 PREVIEW_DPI: int = 200
 
 TITLE: str = "UC Santa Cruz student parking"
@@ -843,8 +842,8 @@ def render(
     draw_credits(figure, ax)
 
     figure.savefig(output_path, metadata={"Title": TITLE})
-    # Raster copy next to the PDF for a quick preview.
-    figure.savefig(output_path.with_name(PREVIEW_NAME), dpi=PREVIEW_DPI)
+    # Raster copy next to the PDF, same name with .png, for a quick preview.
+    figure.savefig(output_path.with_suffix(".png"), dpi=PREVIEW_DPI)
 
 
 def main() -> None:

@@ -4,6 +4,18 @@
 #   make parking   refetch parking lots (daily)
 #   make basemap   build the OSM basemap if missing
 #   make refresh-basemap   rebuild the basemap from a fresh Geofabrik download
+#   make deploy    build the Lambda image, push it to ECR, and update the function
+#   make invoke    run the deployed Lambda once and show its log
+
+# AWS settings (see local.env.example); optional for local rendering.
+-include local.env
+export S3_BUCKET PARKING_URL
+
+# Disable the AWS CLI pager so aws commands print instead of waiting on less.
+export AWS_PAGER =
+
+ECR_REGISTRY = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com
+ECR_URL = $(ECR_REGISTRY)/$(ECR_REPO)
 
 
 # Campus bounding box (lon/lat): parking lot extent plus a small margin.
@@ -22,9 +34,11 @@ PARKING := data/parking.geojson
 BASEMAP := data/basemap.geojson
 POSTER := UCSC Campus Map Poster.pdf
 LABELS := data/poster_labels.csv
-PDF := campus-parking.pdf
+PDF := output/student-parking.pdf
+PNG := $(PDF:.pdf=.png)
 
-.PHONY: all fetch parking basemap refresh-basemap labels render lint clean distclean
+.PHONY: all fetch parking basemap refresh-basemap labels render lint clean distclean \
+	build deploy run-aws invoke
 
 all: fetch render
 
@@ -72,18 +86,49 @@ $(LABELS): buildings.py | data
 
 render: $(PDF)
 
-$(PDF): main.py buildings.py $(PARKING) $(BASEMAP) $(LABELS)
-	@# also writes map.png next to the PDF for previewing
+$(PDF): main.py buildings.py $(PARKING) $(BASEMAP) $(LABELS) | output
+	@# also writes $(PNG) next to the PDF for previewing
 	uv run main.py $(PARKING) $(BASEMAP) $(LABELS) $@
 
 lint:
-	black main.py buildings.py
+	black main.py buildings.py lambda_handler.py
 
-data:
+data output:
 	mkdir -p $@
 
 clean:
-	rm -f $(PDF) map.png data/*.tmp
+	rm -f $(PDF) $(PNG) data/*.tmp response.json
 
 distclean: clean
 	rm -rf data
+
+# Lambda image: single platform (Lambda runs x86_64), no provenance manifest,
+# which Lambda can't read. The basemap and labels are baked in.
+build: $(BASEMAP) $(LABELS)
+	docker build --platform linux/amd64 --provenance=false \
+		--build-arg PARKING_URL='$(PARKING_URL)' -t $(IMAGE_NAME) .
+
+deploy: build
+	aws ecr get-login-password --region $(AWS_REGION) | docker login --username AWS --password-stdin $(ECR_REGISTRY)
+	docker tag $(IMAGE_NAME):latest $(ECR_URL):$(IMAGE_NAME)
+	docker push $(ECR_URL):$(IMAGE_NAME)
+	aws lambda update-function-code \
+		--function-name $(FUNCTION_NAME) \
+		--image-uri $(ECR_URL):$(IMAGE_NAME) \
+		--publish
+	aws lambda wait function-updated-v2 --function-name $(FUNCTION_NAME)
+
+# Run the Lambda handler locally, uploading to the S3 bucket in local.env.
+run-aws: $(BASEMAP) $(LABELS)
+	uv run lambda_handler.py
+
+invoke:
+	aws lambda invoke \
+		--function-name $(FUNCTION_NAME) \
+		--cli-binary-format raw-in-base64-out \
+		--payload '{}' \
+		--log-type Tail \
+		--query 'LogResult' \
+		--output text \
+		response.json | base64 --decode
+	cat response.json

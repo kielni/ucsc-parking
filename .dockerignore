@@ -1,0 +1,7 @@
+# Keep the build context small; the Dockerfile copies only what it needs.
+*
+!main.py
+!buildings.py
+!lambda_handler.py
+!data/basemap.geojson
+!data/poster_labels.csv
