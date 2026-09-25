@@ -9,7 +9,29 @@ dependencies = [
     "boto3>=1.43.101",
     "geopandas>=1.1.4",
     "matplotlib>=3.11.2",
+    "numpy>=2.5.3",
+    "pandas>=3.0.6",
     "pdfplumber>=0.11.10",
     "pypdf>=6.19.0",
     "shapely>=2.1.2",
 ]
+
+[dependency-groups]
+dev = [
+    "black>=26.5.1",
+    "boto3-stubs[s3]>=1.43.102",
+    "mypy>=2.3.1",
+    "pandas-stubs>=3.0.5.260914",
+    "types-geopandas>=1.1.4.20260916",
+    "types-shapely>=2.1.0.20260728",
+]
+
+# adjustText has no type stubs or py.typed marker.
+[[tool.mypy.overrides]]
+module = ["adjustText"]
+ignore_missing_imports = true
+
+# requires-python ">=3.14" would let black target Python 3.15, which the
+# 3.14 interpreter can't parse for its safety check.
+[tool.black]
+target-version = ["py314"]

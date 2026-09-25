@@ -1,41 +1,46 @@
-"""Extract building labels from the UCSC Campus Map Poster PDF.
+"""Extract building labels from the UCSC Campus Map Poster PDF and place them.
 
-Usage: python buildings.py POSTER OUTPUT
+Usage: python buildings.py POSTER BASEMAP OUTPUT
 
 Reads the black map labels (building names), including labels rotated to
 follow a building, and joins labels that wrap over several lines. Skips the
 white area labels (colleges, fields), curved road names, grid labels, the
 index box, and the credits. Each label gets its grid cell (e.g. "E4") and,
 when one matches, the properly capitalized name from the poster's index.
-Writes a CSV with one row per label; x and y are the label center in poster
-points from the top-left corner, and angle is the text direction in degrees
-counterclockwise from horizontal.
+
+The poster has no coordinates, so labels are placed on the OSM buildings in
+BASEMAP (the osmium GeoJSON export) through an affine fit from poster points
+to map meters. Writes a CSV with one row per label: x and y are the label
+center in poster points from the top-left corner, angle is the text
+direction in degrees counterclockwise from horizontal, and easting and
+northing are the label's map position in UTM zone 10N (EPSG:32610) meters.
 """
 
 import argparse
-import csv
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import TextIO
 
+import geopandas as gpd
+import numpy as np
+import pandas as pd
 import pdfplumber
 from pdfplumber.page import Page
 
 # CMYK fill colors used on the poster.
-WHITE: tuple[float, ...] = (0.0, 0.0, 0.0, 0.0)
-GRID_COLOR: tuple[float, ...] = (0.75, 0.68, 0.67, 0.9)
+WHITE = (0.0, 0.0, 0.0, 0.0)
+GRID_COLOR = (0.75, 0.68, 0.67, 0.9)
 
 # The index and legend box in the lower-left corner: (x0, top, x1, bottom).
-INDEX_BOX: tuple[float, float, float, float] = (80.0, 2120.0, 890.0, 2510.0)
+INDEX_BOX = (80.0, 2120.0, 890.0, 2510.0)
 # Text below this (points from the top) is credits and grid letters.
-MAP_BOTTOM: float = 2510.0
+MAP_BOTTOM = 2510.0
 GRID_REF: re.Pattern[str] = re.compile(r"^[A-J]\d{1,2}$")
 
 # Map labels ending in one of these words are road names, not buildings.
-ROAD_WORDS: set[str] = {
+ROAD_WORDS = {
     "COURT",
     "DRIVE",
     "GRADE",
@@ -47,36 +52,36 @@ ROAD_WORDS: set[str] = {
     "WAY",
 }
 # Labels containing one of these words are parking lots, not buildings.
-PARKING_WORDS: set[str] = {"PARKING"}
+PARKING_WORDS = {"PARKING"}
 # Fragments of road names that the road and curve checks miss.
-NOT_BUILDINGS: set[str] = {"BAY D"}
+NOT_BUILDINGS = {"BAY D"}
 
 # Title casing for labels with no index name: these words stay lowercase
 # (unless first) and these stay uppercase.
-SMALL_WORDS: set[str] = {"a", "and", "for", "of", "the"}
-ACRONYMS: set[str] = {"KZSC", "NS", "OPERS", "UCO"}
+SMALL_WORDS = {"a", "and", "for", "of", "the"}
+ACRONYMS = {"KZSC", "NS", "OPERS", "UCO"}
 
 # Characters continue a line when their direction differs by less than this
 # (degrees) and they start within this distance (x font size) of where the
 # previous character ended. Road names on curves turn a little every letter.
-ANGLE_TOLERANCE: float = 1.0
-ADVANCE_TOLERANCE: float = 0.3
+ANGLE_TOLERANCE = 1.0
+ADVANCE_TOLERANCE = 0.3
 # A following letter turned by less than this (degrees), within this distance
 # (x font size), marks curved text; the gap widens where road names bend.
-CURVE_ANGLE: float = 30.0
-CURVE_ADVANCE: float = 1.0
+CURVE_ANGLE = 30.0
+CURVE_ADVANCE = 1.0
 # Stacked lines of one label are this far apart (x font size).
-LINE_GAP: tuple[float, float] = (0.5, 1.4)
+LINE_GAP = (0.5, 1.4)
 # Index entries in different columns are at least this far apart (points).
-COLUMN_GAP: float = 12.0
+COLUMN_GAP = 12.0
 # Short forms used on map labels or in the index, expanded before matching.
-ABBREVIATIONS: dict[str, str] = {
+ABBREVIATIONS = {
     "APTS": "APARTMENTS",
     "BLDG": "BUILDING",
     "LABS": "LABORATORIES",
 }
 # Minimum similarity for a label to take its name from the index.
-MATCH_CUTOFF: float = 0.8
+MATCH_CUTOFF = 0.8
 
 
 @dataclass
@@ -127,10 +132,6 @@ def cmyk(color: object) -> tuple[float, ...]:
 
 def in_index_box(obj: dict) -> bool:
     """Return True if a character or word lies inside the index box."""
-    x0: float
-    top: float
-    x1: float
-    bottom: float
     x0, top, x1, bottom = INDEX_BOX
     return x0 <= obj["x0"] and obj["x1"] <= x1 and top <= obj["top"] <= bottom
 
@@ -148,12 +149,8 @@ def char_geometry(
     char: dict,
 ) -> tuple[float, tuple[float, float], tuple[float, float]]:
     """Return a character's font size, baseline direction, and origin."""
-    a: float
-    b: float
-    e: float
-    f: float
     a, b, _, _, e, f = char["matrix"]
-    size: float = math.hypot(a, b)
+    size = math.hypot(a, b)
     return size, (a / size, b / size), (e, f)
 
 
@@ -161,11 +158,7 @@ def build_lines(chars: list[dict]) -> list[Line]:
     """Join characters, in content-stream order, into baseline-aligned lines."""
     lines: list[Line] = []
     current: Line | None = None
-    char: dict
     for char in chars:
-        size: float
-        direction: tuple[float, float]
-        origin: tuple[float, float]
         size, direction, origin = char_geometry(char)
         style: tuple[str, float, tuple[float, ...]] = (
             char["fontname"],
@@ -176,18 +169,22 @@ def build_lines(chars: list[dict]) -> list[Line]:
             origin[0] + char["adv"] * size * direction[0],
             origin[1] + char["adv"] * size * direction[1],
         )
-        turn: float = 180.0
-        gap: float = math.inf
+        turn = 180.0
+        gap = math.inf
         if current is not None and current.style == style:
             turn = angle_between(current.direction, direction)
             gap = math.dist(current.end, origin)
-        if gap < ADVANCE_TOLERANCE * size and turn < ANGLE_TOLERANCE:
+        if (
+            current is not None
+            and gap < ADVANCE_TOLERANCE * size
+            and turn < ANGLE_TOLERANCE
+        ):
             current.text += char["text"]
             current.end = end
             continue
         # A letter that follows on but turns slightly means text on a curve.
         curved: bool = gap < CURVE_ADVANCE * size and turn < CURVE_ANGLE
-        if curved:
+        if curved and current is not None:
             current.curved = True
         current = Line(char["text"], origin, end, direction, size, style, curved)
         lines.append(current)
@@ -196,7 +193,7 @@ def build_lines(chars: list[dict]) -> list[Line]:
 
 def angle_between(first: tuple[float, float], second: tuple[float, float]) -> float:
     """Return the angle in degrees between two unit vectors."""
-    dot: float = first[0] * second[0] + first[1] * second[1]
+    dot = first[0] * second[0] + first[1] * second[1]
     return math.degrees(math.acos(max(-1.0, min(1.0, dot))))
 
 
@@ -204,17 +201,17 @@ def stacks(upper: Line, lower: Line) -> bool:
     """Return True if lower is the next line of the same label as upper."""
     if upper.style != lower.style:
         return False
-    dot: float = (
+    dot = (
         upper.direction[0] * lower.direction[0]
         + upper.direction[1] * lower.direction[1]
     )
     if dot < math.cos(math.radians(ANGLE_TOLERANCE)):
         return False
-    dx: float = lower.center[0] - upper.center[0]
-    dy: float = lower.center[1] - upper.center[1]
-    along: float = dx * upper.direction[0] + dy * upper.direction[1]
+    dx = lower.center[0] - upper.center[0]
+    dy = lower.center[1] - upper.center[1]
+    along = dx * upper.direction[0] + dy * upper.direction[1]
     # Distance below the upper line, measured perpendicular to its baseline.
-    below: float = dx * upper.direction[1] - dy * upper.direction[0]
+    below = dx * upper.direction[1] - dy * upper.direction[0]
     if not LINE_GAP[0] * upper.size <= below <= LINE_GAP[1] * upper.size:
         return False
     # Label lines are centered, so their centers are close together.
@@ -224,7 +221,6 @@ def stacks(upper: Line, lower: Line) -> bool:
 def group_lines(lines: list[Line]) -> list[list[Line]]:
     """Group stacked lines into labels, top line first."""
     groups: list[list[Line]] = []
-    line: Line
     for line in lines:
         group: list[Line]
         for group in reversed(groups):
@@ -238,12 +234,12 @@ def group_lines(lines: list[Line]) -> list[list[Line]]:
 
 def is_building(text: str) -> bool:
     """Drop road names, parking lots, stray letters, and numbers."""
-    words: list[str] = text.split()
+    words = text.split()
     if words[-1] in ROAD_WORDS or PARKING_WORDS & set(words):
         return False
     if text in NOT_BUILDINGS:
         return False
-    letters: int = sum(1 for char in text if char.isalpha())
+    letters = sum(1 for char in text if char.isalpha())
     return letters >= 4 and any(len(word) >= 3 and word.isalpha() for word in words)
 
 
@@ -258,7 +254,6 @@ def grid_axes(page: Page) -> tuple[dict[str, float], dict[str, float]]:
     """Return grid column centers (A-J by x) and row centers (1-15 by y)."""
     columns: dict[str, float] = {}
     rows: dict[str, float] = {}
-    word: dict
     for word in extract_words(page):
         if cmyk(word["non_stroking_color"]) != GRID_COLOR or in_index_box(word):
             continue
@@ -275,18 +270,17 @@ def grid_cell(
     x: float, y: float, columns: dict[str, float], rows: dict[str, float]
 ) -> str:
     """Return the grid cell name (e.g. "E4") nearest to a poster position."""
-    column: str = min(columns, key=lambda name: abs(columns[name] - x))
-    row: str = min(rows, key=lambda name: abs(rows[name] - y))
+    column = min(columns, key=lambda name: abs(columns[name] - x))
+    row = min(rows, key=lambda name: abs(rows[name] - y))
     return f"{column}{row}"
 
 
 def extract_index(page: Page) -> list[tuple[str, str]]:
     """Return (name, grid cell) entries from the poster's index."""
-    words: list[dict] = [word for word in extract_words(page) if in_index_box(word)]
+    words = [word for word in extract_words(page) if in_index_box(word)]
     entries: list[tuple[str, str]] = []
     name: list[str] = []
     last: dict | None = None
-    word: dict
     for word in sorted(words, key=lambda w: (round(w["top"]), w["x0"])):
         new_line: bool = last is None or abs(word["top"] - last["top"]) > 1
         if new_line:
@@ -296,7 +290,11 @@ def extract_index(page: Page) -> list[tuple[str, str]]:
             if name:
                 entries.append((" ".join(name), word["text"]))
             name = []
-        elif name and (word["x0"] - last["x1"] > COLUMN_GAP or word["x0"] < last["x0"]):
+        elif (
+            name
+            and last is not None
+            and (word["x0"] - last["x1"] > COLUMN_GAP or word["x0"] < last["x0"])
+        ):
             # A wide gap, or a jump back left from a word a fraction of a
             # point higher, starts a new column entry.
             name = [word["text"]]
@@ -308,7 +306,7 @@ def extract_index(page: Page) -> list[tuple[str, str]]:
 
 def normalize(text: str) -> str:
     """Uppercase, expand abbreviations, and strip punctuation and spaces."""
-    words: list[str] = re.findall(r"[A-Z0-9]+", text.upper())
+    words = re.findall(r"[A-Z0-9]+", text.upper())
     return "".join(ABBREVIATIONS.get(word, word) for word in words)
 
 
@@ -327,8 +325,6 @@ def title_case(text: str) -> str:
     'NS 2 Annex'
     """
     words: list[str] = []
-    index: int
-    word: str
     for index, word in enumerate(text.split()):
         if word in ACRONYMS:
             words.append(word)
@@ -341,8 +337,8 @@ def title_case(text: str) -> str:
 
 def near_cell(first: str, second: str) -> bool:
     """Return True if two grid cells are the same or touch (e.g. C6 and D7)."""
-    columns: int = abs(ord(first[0]) - ord(second[0]))
-    rows: int = abs(int(first[1:]) - int(second[1:]))
+    columns = abs(ord(first[0]) - ord(second[0]))
+    rows = abs(int(first[1:]) - int(second[1:]))
     return columns <= 1 and rows <= 1
 
 
@@ -353,10 +349,8 @@ def match_index(label: Label, index: list[tuple[str, str]]) -> str:
     farther away are a different building with a similar name.
     """
     target: str = normalize(label.text)
-    best_name: str = ""
-    best_score: float = MATCH_CUTOFF
-    name: str
-    cell: str
+    best_name = ""
+    best_score = MATCH_CUTOFF
     for name, cell in index:
         if not near_cell(cell, label.grid):
             continue
@@ -378,10 +372,10 @@ def make_label(
     first: Line = group[0]
     last: Line = group[-1]
     # Midway between the first and last baselines, raised half a cap height.
-    x: float = (first.center[0] + last.center[0]) / 2 - first.direction[1] * (
+    x = (first.center[0] + last.center[0]) / 2 - first.direction[1] * (
         first.size * 0.35
     )
-    y: float = height - (
+    y = height - (
         (first.center[1] + last.center[1]) / 2 + first.direction[0] * first.size * 0.35
     )
     return Label(
@@ -403,14 +397,14 @@ def extract_labels(poster: Path) -> list[Label]:
         columns, rows = grid_axes(page)
         index: list[tuple[str, str]] = extract_index(page)
         chars: list[dict] = [char for char in page.chars if is_label_char(char)]
-        height: float = float(page.height)
+        height = float(page.height)
 
     labels: list[Label] = []
     group: list[Line]
     for group in group_lines(build_lines(chars)):
         if any(line.curved for line in group):
             continue
-        label: Label = make_label(group, height, columns, rows)
+        label = make_label(group, height, columns, rows)
         if not is_building(label.text):
             continue
         label.index_name = match_index(label, index) or title_case(label.text)
@@ -418,29 +412,133 @@ def extract_labels(poster: Path) -> list[Label]:
     return labels
 
 
-def write_labels(labels: list[Label], output: Path) -> None:
-    """Write labels to CSV, sorted by grid cell then name."""
-    fields: list[str] = ["text", "index_name", "grid", "x", "y", "angle", "size"]
-    handle: TextIO
-    with output.open("w", newline="") as handle:
-        writer: csv.DictWriter = csv.DictWriter(handle, fieldnames=fields)
-        writer.writeheader()
-        label: Label
-        for label in sorted(labels, key=lambda label: (label.grid, label.text)):
-            writer.writerow({field: getattr(label, field) for field in fields})
+def load_buildings(path: Path) -> gpd.GeoDataFrame:
+    """Read OSM building outlines from the basemap, in UTM zone 10N meters."""
+    features = gpd.read_file(path)
+    if features.crs is None:
+        features = features.set_crs("EPSG:4326")
+    # Same CRS as main.py's PLOT_CRS, so the map can use the positions as is.
+    features = features.to_crs("EPSG:32610")
+    for column in ("building", "name"):
+        if column not in features:
+            features[column] = None
+    return features[
+        features["building"].notna()
+        & features.geom_type.isin(["Polygon", "MultiPolygon"])
+    ]
+
+
+def named_buildings(buildings: gpd.GeoDataFrame) -> gpd.GeoSeries:
+    """Return OSM building outlines by normalized name.
+
+    Buildings split into several polygons with the same name are merged.
+    """
+    named = buildings[buildings["name"].notna()].copy()
+    named["key"] = named["name"].map(normalize)
+    return named.dissolve(by="key").geometry
+
+
+def fit_poster_transform(
+    labels: pd.DataFrame, buildings: gpd.GeoDataFrame
+) -> np.ndarray:
+    """Fit an affine transform from poster points to map meters.
+
+    Control points are poster labels whose name matches exactly one OSM
+    building name; buildings split into several polygons are merged first.
+    The worst control point is dropped until all fit within 40 m, since a
+    few poster labels sit beside their building. Fails if fewer than 6
+    control points remain. Returns a 3x2 matrix:
+    [x, y, 1] @ matrix = [easting, northing].
+    """
+    anchors = named_buildings(buildings).representative_point()
+    poster = labels.assign(key=labels["index_name"].map(normalize))
+    poster = poster.drop_duplicates("key", keep=False)
+    pairs = poster[poster["key"].isin(anchors.index)]
+    source = np.column_stack([pairs["x"], pairs["y"], np.ones(len(pairs))])
+    target = np.column_stack([anchors.x.loc[pairs["key"]], anchors.y.loc[pairs["key"]]])
+    while len(source) >= 6:
+        matrix = np.linalg.lstsq(source, target, rcond=None)[0]
+        errors = np.linalg.norm(source @ matrix - target, axis=1)
+        if errors.max() <= 40.0:
+            print(
+                f"poster fit: {len(source)} control points,"
+                f" RMS {np.sqrt(np.mean(errors**2)):.1f} m"
+            )
+            return matrix
+        worst = int(errors.argmax())
+        source = np.delete(source, worst, axis=0)
+        target = np.delete(target, worst, axis=0)
+    raise ValueError("too few poster labels match OSM building names")
+
+
+def place_labels(labels: pd.DataFrame, buildings: gpd.GeoDataFrame) -> pd.DataFrame:
+    """Add each label's map position, on its building where possible.
+
+    A label whose name matches one compact OSM building (all parts within a
+    150 m diagonal) goes on that building. Other labels are placed by the
+    poster fit and snapped to the nearest building within 25 m. Returns the
+    labels with easting and northing columns (meters, to 0.1 m).
+    """
+    matrix = fit_poster_transform(labels, buildings)
+    source = np.column_stack([labels["x"], labels["y"], np.ones(len(labels))])
+    placed = source @ matrix
+    points = gpd.GeoDataFrame(
+        geometry=gpd.points_from_xy(placed[:, 0], placed[:, 1]),
+        index=labels.index,
+        crs=buildings.crs,
+    )
+    nearest = gpd.sjoin_nearest(
+        points, buildings[["geometry"]], how="left", max_distance=25.0
+    )
+    # Ties return several rows per label; keep the first building.
+    nearest = nearest[~nearest.index.duplicated()]
+    snapped = nearest["index_right"].dropna()
+    centers = buildings.representative_point()
+    points.loc[snapped.index, "geometry"] = centers.loc[snapped].values
+
+    # Same-named buildings spread across campus (e.g. several Dining Commons)
+    # are too ambiguous to place a label by name.
+    outlines = named_buildings(buildings)
+    bounds = outlines.bounds
+    diagonal = np.hypot(
+        bounds["maxx"] - bounds["minx"], bounds["maxy"] - bounds["miny"]
+    )
+    # Center point of each compact building, by name.
+    compact = outlines.representative_point().loc[diagonal <= 150.0]
+    keys = labels["index_name"].map(normalize)
+    unique = ~keys.duplicated(keep=False)
+    matched = keys[unique & keys.isin(compact.index)]
+    points.loc[matched.index, "geometry"] = compact.loc[matched].values
+    return labels.assign(
+        easting=points.geometry.x.round(1), northing=points.geometry.y.round(1)
+    )
 
 
 def main() -> None:
     """Parse command line arguments and write the building label CSV."""
-    parser: argparse.ArgumentParser = argparse.ArgumentParser(
-        description=__doc__.splitlines()[0]
-    )
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("poster", type=Path, help="campus map poster PDF")
+    parser.add_argument("basemap", type=Path, help="OSM basemap GeoJSON")
     parser.add_argument("output", type=Path, help="CSV to write")
-    args: argparse.Namespace = parser.parse_args()
-    labels: list[Label] = extract_labels(args.poster)
-    write_labels(labels, args.output)
-    print(f"{args.output}: {len(labels)} labels")
+    args = parser.parse_args()
+    labels = pd.DataFrame([asdict(label) for label in extract_labels(args.poster)])
+    placed = place_labels(labels, load_buildings(args.basemap))
+    # Sorted by grid cell then name, so the CSV reads like the poster index.
+    columns = [
+        "text",
+        "index_name",
+        "grid",
+        "x",
+        "y",
+        "angle",
+        "size",
+        "easting",
+        "northing",
+    ]
+    placed.sort_values(["grid", "text"]).to_csv(
+        args.output, columns=columns, index=False
+    )
+    print(f"{args.output}: {len(placed)} labels")
 
 
 if __name__ == "__main__":

@@ -32,7 +32,7 @@ FILTERED_PBF := data/campus-filtered.osm.pbf
 
 PARKING := data/parking.geojson
 BASEMAP := data/basemap.geojson
-POSTER := UCSC Campus Map Poster.pdf
+POSTER := data/UCSC Campus Map Poster.pdf
 LABELS := data/poster_labels.csv
 PDF := output/student-parking.pdf
 PNG := $(PDF:.pdf=.png)
@@ -78,20 +78,22 @@ refresh-basemap:
 	rm -f $(BASEMAP)
 	$(MAKE) basemap
 
-# Building names and poster positions; only changes if the poster does.
+# Building names from the poster, placed on OSM buildings; only changes if the
+# poster or basemap does.
 labels: $(LABELS)
 
-$(LABELS): buildings.py | data
-	uv run buildings.py "$(POSTER)" $@
+$(LABELS): buildings.py $(BASEMAP) | data
+	uv run buildings.py "$(POSTER)" $(BASEMAP) $@
 
 render: $(PDF)
 
-$(PDF): main.py buildings.py $(PARKING) $(BASEMAP) $(LABELS) | output
+$(PDF): main.py $(PARKING) $(BASEMAP) $(LABELS) | output
 	@# also writes $(PNG) next to the PDF for previewing
 	uv run main.py $(PARKING) $(BASEMAP) $(LABELS) $@
 
 lint:
-	black main.py buildings.py lambda_handler.py
+	uv run black main.py buildings.py lambda_handler.py
+	uv run mypy main.py buildings.py lambda_handler.py
 
 data output:
 	mkdir -p $@

@@ -2,7 +2,7 @@
 
 **As a student with an A parking permit, I want to search for a building and find nearby parking for a class or the day.**
 
-The [PDF building map](UCSC Campus Map Poster.pdf) works offline, but
+The [PDF building map](data/UCSC%20Campus%20Map%20Poster.pdf) works offline, but
 doesn't show parking lots.
 
 <img src="output/poster.png" width=600>
@@ -51,11 +51,12 @@ search the PDF for a building name.
 3. **Building names** come from the campus map poster PDF. `buildings.py`
    reads the text on the poster, including labels rotated to follow a
    building, and skips road names, white area labels (colleges, fields), and
-   the grid. The poster has no coordinates, so the project
+   the grid. The poster has no coordinates, so `buildings.py` also
    **georeferences** its labels: poster labels whose names match an
    OpenStreetMap building serve as control points for an affine transform
-   from poster position to map position. The project then places each label
-   on its matching or nearest building.
+   from poster position to map position. It then places each label on its
+   matching or nearest building and saves the map coordinates with the label,
+   so this runs once, not on every map update.
 
 The project reprojects all layers to UTM zone 10N (EPSG:32610), so distances
 are in meters and shapes keep their true proportions. The map shades lots by
@@ -65,7 +66,7 @@ labels apart.
 
 | file | what it does |
 |---|---|
-| `buildings.py` | extracts building labels from the poster to `data/poster_labels.csv` |
+| `buildings.py` | extracts building labels from the poster, places them on OpenStreetMap buildings, and writes `data/poster_labels.csv` |
 | `main.py` | draws the map and writes the PDF and a PNG preview |
 | `lambda_handler.py` | runs the daily update on AWS Lambda and uploads to S3 |
 | `Makefile` | the steps below, with the data URLs and campus bounding box |
@@ -87,7 +88,7 @@ Dependencies:
 | `make all` | fetch the data and make the map |
 | `make parking` | download latest parking lot features to `data/parking.geojson` |
 | `make basemap` | build `data/basemap.geojson` from OpenStreetMap; the first run downloads a ~650 MB file, then keeps only the small campus clip |
-| `make labels` | extract building names from the poster to `data/poster_labels.csv` |
+| `make labels` | extract building names from the poster and place them on the basemap buildings, in `data/poster_labels.csv` |
 | `make render` | draw `output/student-parking.pdf` and `output/student-parking.png` |
 | `make refresh-basemap` | rebuild the basemap with newer OpenStreetMap data |
 | `make clean` | delete the map outputs |
@@ -98,4 +99,4 @@ Dependencies:
 To publish the map daily, `make deploy` builds a container image and
 updates an AWS Lambda function that renders the map and uploads it to S3.
 Copy `local.env.example` to `local.env` and fill in the AWS settings first.
-The function needs at least 512 GB of memory and runs in about 20 seconds.
+The function needs at least 512 MB of memory and runs in about 20 seconds.
